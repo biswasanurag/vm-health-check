@@ -46,7 +46,7 @@ fi
 
 # Get CPU usage (percentage used = 100 - idle)
 # Use top to get the "id" (idle) value and compute used
-cpu_idle=$(top -bn1 | grep "Cpu(s)" | sed -n 's/.*, *\([0-9.]*\) id.*/\1/p')
+cpu_idle=$(top -bn1 2>/dev/null | grep "Cpu(s)" | sed -n 's/.*, *\([0-9.]*\) id.*/\1/p')
 if [ -z "$cpu_idle" ]; then
   # fallback using /proc/stat sampling (works even if top format differs)
   read -r cpu a b c d e f g < /proc/stat
@@ -70,7 +70,11 @@ fi
 # Get memory usage using `free` (use available if present)
 # mem_used_percent = (total - available) / total * 100
 if free --help >/dev/null 2>&1; then
-  read -r mem_total mem_avail < <(free -m | awk '/^Mem:/ {print $2, ($7 == "" ? $3 : $7)}')
+  mem_vals=$(free -m | awk '/^Mem:/ {if ($7 != "") print $2, $7; else print $2, $3}')
+  # split mem_vals into two positional params
+  set -- $mem_vals
+  mem_total=$1
+  mem_avail=$2
   if [ -z "$mem_total" ] || [ -z "$mem_avail" ]; then
     mem_total=$(free -m | awk '/^Mem:/ {print $2}')
     mem_used=$(free -m | awk '/^Mem:/ {print $3}')
@@ -83,10 +87,11 @@ fi
 
 # Get disk usage for root filesystem
 # Use POSIX df (-P) and parse percent used for /
-disk_used_percent=$(df -P / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+disk_used_percent=$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 if [ -z "$disk_used_percent" ]; then
   disk_used_percent="0"
 fi
+# Format as one decimal for consistency
 disk_used_percent=$(awk -v v="$disk_used_percent" 'BEGIN{printf "%.1f", v}')
 
 # Determine health: if ANY metric > THRESHOLD -> Non-Healthy
@@ -94,24 +99,25 @@ is_non_healthy=false
 cpu_status="OK"
 mem_status="OK"
 disk_status="OK"
-reason_list=()
+reason_list=""
 
+# Compare using awk to handle floats
 if awk -v val="$cpu_usage" -v t="$THRESHOLD" 'BEGIN{exit !(val > t)}'; then
   is_non_healthy=true
   cpu_status="EXCEEDED"
-  reason_list+=("CPU usage ${cpu_usage}% > ${THRESHOLD}%")
+  reason_list="${reason_list}CPU usage ${cpu_usage}% > ${THRESHOLD}%\n"
 fi
 
 if awk -v val="$mem_used_percent" -v t="$THRESHOLD" 'BEGIN{exit !(val > t)}'; then
   is_non_healthy=true
   mem_status="EXCEEDED"
-  reason_list+=("Memory usage ${mem_used_percent}% > ${THRESHOLD}%")
+  reason_list="${reason_list}Memory usage ${mem_used_percent}% > ${THRESHOLD}%\n"
 fi
 
 if awk -v val="$disk_used_percent" -v t="$THRESHOLD" 'BEGIN{exit !(val > t)}'; then
   is_non_healthy=true
   disk_status="EXCEEDED"
-  reason_list+=("Disk (/) usage ${disk_used_percent}% > ${THRESHOLD}%")
+  reason_list="${reason_list}Disk (/) usage ${disk_used_percent}% > ${THRESHOLD}%\n"
 fi
 
 overall_health="Healthy"
@@ -130,8 +136,9 @@ if [ "$EXPLAIN" = true ]; then
   if [ "$is_non_healthy" = true ]; then
     echo "Overall status: $overall_health"
     echo "Reasons:"
-    for r in "${reason_list[@]}"; do
-      echo " - $r"
+    # Print each reason line prefixed with ' - '
+    printf "%b" "$reason_list" | while IFS= read -r r; do
+      [ -n "$r" ] && echo " - $r"
     done
     exit 1
   else
@@ -140,6 +147,7 @@ if [ "$EXPLAIN" = true ]; then
     exit 0
   fi
 else
+  # Brief output: print overall health + metrics single line
   printf "Overall: %s (CPU: %s%%, Mem: %s%%, Disk(/): %s%%)\n" "$overall_health" "$cpu_usage" "$mem_used_percent" "$disk_used_percent"
   if [ "$is_non_healthy" = true ]; then
     exit 1
